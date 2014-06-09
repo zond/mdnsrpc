@@ -2,6 +2,7 @@ package mdnsrpc
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"net/rpc"
 	"os"
@@ -65,6 +66,50 @@ type Client struct {
 	client *rpc.Client
 }
 
+/*
+Go works just like http://golang.org/pkg/net/rpc/#Client.Go except that it also removes the client from the cache if an error is returned.
+*/
+func (self *Client) Go(serviceMethod string, args interface{}, reply interface{}, done chan *rpc.Call) (result *rpc.Call) {
+	// create the background *rpc.Call
+	call := self.client.Go(serviceMethod, args, reply, done)
+	// make sure we have a done channel with capacity
+	if done == nil {
+		done = make(chan *rpc.Call, 10)
+	} else {
+		if cap(done) == 0 {
+			log.Panic("rpc: done channel is unbuffered")
+		}
+	}
+	// create our own result that looks like the *rpc.Call we ordered earlier
+	result = &rpc.Call{
+		ServiceMethod: call.ServiceMethod,
+		Args:          call.Args,
+		Reply:         call.Reply,
+		Error:         call.Error,
+		Done:          done,
+	}
+	// wait until the background *rpc.Call is done, then update and send our result through the channel
+	go func() {
+		doneCall := <-call.Done
+		result.Error = doneCall.Error
+		select {
+		case done <- result:
+		default:
+		}
+		// and delete the client if there was en error
+		if call.Error != nil {
+			self.client.Close()
+			clientsLock.Lock()
+			defer clientsLock.Unlock()
+			delete(clients, self.addr)
+		}
+	}()
+	return
+}
+
+/*
+Call works just like http://golang.org/pkg/net/rpc/#Client.Call except that it also removes the client from the cache if an error is returned.
+*/
 func (self *Client) Call(service string, input, output interface{}) (err error) {
 	if err = self.client.Call(service, input, output); err != nil {
 		self.client.Close()
@@ -95,12 +140,18 @@ func Connect(addr string) (result *Client, err error) {
 	return
 }
 
+/*
+NoSuchService is returned when LookupAll fails to find a single service.
+*/
 type NoSuchService string
 
 func (self NoSuchService) Error() string {
 	return fmt.Sprintf("Failed to find any %#v", string(self))
 }
 
+/*
+NotOneService is returned when LookupOne fails to find exactly one service.
+*/
 type NotOneService struct {
 	Name  string
 	Found []string
