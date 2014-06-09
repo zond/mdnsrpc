@@ -3,10 +3,13 @@ package mdnsrpc
 import (
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"net/rpc"
 	"os"
+	"runtime/debug"
 	"sync"
+	"time"
 
 	"github.com/armon/mdns"
 )
@@ -16,9 +19,16 @@ var entriesLock = &sync.RWMutex{}
 var clients = map[string]*Client{}
 var clientsLock = &sync.RWMutex{}
 
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
 func lookupAll(name string) (err error) {
 	addresses := []string{}
-	serviceEntries := make(chan *mdns.ServiceEntry)
+	serviceEntries := make(chan *mdns.ServiceEntry, 2<<16)
+	params := mdns.DefaultParams(name)
+	params.Entries = serviceEntries
+	params.Timeout = time.Second * 2
 	done := make(chan struct{})
 	go func() {
 		for entry := range serviceEntries {
@@ -111,6 +121,9 @@ func (self *Client) Go(serviceMethod string, args interface{}, reply interface{}
 Call works just like http://golang.org/pkg/net/rpc/#Client.Call except that it prepends "rpc." to the serviceMethod, and also removes the client from the cache if an error is returned.
 */
 func (self *Client) Call(service string, input, output interface{}) (err error) {
+	if self == nil {
+		fmt.Printf("%s\n", debug.Stack())
+	}
 	if err = self.client.Call("rpc."+service, input, output); err != nil {
 		self.client.Close()
 		clientsLock.Lock()
@@ -125,6 +138,7 @@ Connect returns a *Client to the addr.
 */
 func Connect(addr string) (result *Client, err error) {
 	clientsLock.Lock()
+	defer clientsLock.Unlock()
 	result, found := clients[addr]
 	if !found {
 		var rpcClient *rpc.Client
@@ -186,10 +200,10 @@ func LookupOne(name string) (result *Client, err error) {
 		}
 		return LookupOne(name)
 	}
+	if result, err = Connect(addresses[0]); err != nil {
+		return
+	}
 	go connectAll(name)
-	clientsLock.RLock()
-	result = clients[addresses[0]]
-	clientsLock.RUnlock()
 	return
 }
 
@@ -215,11 +229,14 @@ func LookupAll(name string) (result []*Client, err error) {
 		}
 		return LookupAll(name)
 	}
-	clientsLock.RLock()
-	defer clientsLock.RUnlock()
 	for _, addr := range addresses {
-		result = append(result, clients[addr])
+		var client *Client
+		if client, err = Connect(addr); err != nil {
+			return
+		}
+		result = append(result, client)
 	}
+	go connectAll(name)
 	return
 }
 
@@ -267,7 +284,7 @@ func Publish(name string, service interface{}) (unpublish chan struct{}, err err
 		return
 	}
 	entry := &mdns.MDNSService{
-		Instance: hostname,
+		Instance: fmt.Sprintf("%v.%v", hostname, rand.Int63()),
 		Service:  fmt.Sprintf("_%s._tcp", name),
 		Addr:     listenAddr.IP,
 		Port:     listenAddr.Port,

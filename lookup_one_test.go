@@ -25,7 +25,7 @@ func ExampleLookupOne() {
 		panic(err)
 	}
 	res := 0
-	if err := cli.Call("rpc.Add", Numbers{1, 2, 3}, &res); err != nil {
+	if err := cli.Call("Add", Numbers{1, 2, 3}, &res); err != nil {
 		panic(err)
 	}
 	fmt.Println("Sum is", res)
