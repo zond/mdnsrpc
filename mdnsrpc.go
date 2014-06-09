@@ -67,11 +67,11 @@ type Client struct {
 }
 
 /*
-Go works just like http://golang.org/pkg/net/rpc/#Client.Go except that it also removes the client from the cache if an error is returned.
+Go works just like http://golang.org/pkg/net/rpc/#Client.Go except that it prepends "rpc." to the serviceMethod, and also removes the client from the cache if an error is returned.
 */
 func (self *Client) Go(serviceMethod string, args interface{}, reply interface{}, done chan *rpc.Call) (result *rpc.Call) {
 	// create the background *rpc.Call
-	call := self.client.Go(serviceMethod, args, reply, done)
+	call := self.client.Go("rpc."+serviceMethod, args, reply, done)
 	// make sure we have a done channel with capacity
 	if done == nil {
 		done = make(chan *rpc.Call, 10)
@@ -108,10 +108,10 @@ func (self *Client) Go(serviceMethod string, args interface{}, reply interface{}
 }
 
 /*
-Call works just like http://golang.org/pkg/net/rpc/#Client.Call except that it also removes the client from the cache if an error is returned.
+Call works just like http://golang.org/pkg/net/rpc/#Client.Call except that it prepends "rpc." to the serviceMethod, and also removes the client from the cache if an error is returned.
 */
 func (self *Client) Call(service string, input, output interface{}) (err error) {
-	if err = self.client.Call(service, input, output); err != nil {
+	if err = self.client.Call("rpc."+service, input, output); err != nil {
 		self.client.Close()
 		clientsLock.Lock()
 		defer clientsLock.Unlock()
@@ -224,9 +224,9 @@ func LookupAll(name string) (result []*Client, err error) {
 }
 
 /*
-Publish will serve service using net/rpc on a randomly chosen port on 127.0.0.1, publishing it using mDNS as _name_._tcp.
+Service will serve service registered as "rpc" using net/rpc on a randomly chosen port on 127.0.0.1.
 */
-func Publish(name string, service interface{}) (unpublish chan struct{}, err error) {
+func Service(service interface{}) (addr *net.TCPAddr, shutdown chan struct{}, err error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
 	if err != nil {
 		return
@@ -237,7 +237,7 @@ func Publish(name string, service interface{}) (unpublish chan struct{}, err err
 		return
 	}
 
-	listenAddr, ok := listener.Addr().(*net.TCPAddr)
+	addr, ok := listener.Addr().(*net.TCPAddr)
 	if !ok {
 		err = fmt.Errorf("%v is not a *net.TCPAddr", listener.Addr())
 		return
@@ -246,6 +246,21 @@ func Publish(name string, service interface{}) (unpublish chan struct{}, err err
 	server := rpc.NewServer()
 	server.RegisterName("rpc", service)
 	go server.Accept(listener)
+
+	shutdown = make(chan struct{})
+	go func() {
+		<-shutdown
+		listener.Close()
+	}()
+
+	return
+}
+
+/*
+Publish will serve service registered as "rpc" using net/rpc on a randomly chosen port on 127.0.0.1, publishing it using mDNS as _name_._tcp.
+*/
+func Publish(name string, service interface{}) (unpublish chan struct{}, err error) {
+	listenAddr, shutdown, err := Service(service)
 
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -267,11 +282,11 @@ func Publish(name string, service interface{}) (unpublish chan struct{}, err err
 		return
 	}
 
-	done := make(chan struct{})
+	unpublish = make(chan struct{})
 	go func() {
-		<-done
+		<-unpublish
 		mdnsServer.Shutdown()
-		listener.Close()
+		close(shutdown)
 	}()
 
 	return
