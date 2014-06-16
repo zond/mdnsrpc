@@ -1,6 +1,7 @@
 package mdnsrpc
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"math/rand"
@@ -8,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 
@@ -66,6 +68,34 @@ func connectAll(name string) (err error) {
 		}
 	}
 	return
+}
+
+type Clients []*Client
+
+func (self Clients) Len() int {
+	return len(self)
+}
+
+func (self Clients) Less(i, j int) bool {
+	return bytes.Compare([]byte(self[i].addr), []byte(self[j].addr)) < 0
+}
+
+func (self Clients) Swap(i, j int) {
+	self[i], self[j] = self[j], self[i]
+}
+
+func (self Clients) Equals(o Clients) bool {
+	if len(self) != len(o) {
+		return false
+	}
+	sort.Sort(self)
+	sort.Sort(o)
+	for index, cli := range self {
+		if o[index] != cli {
+			return false
+		}
+	}
+	return true
 }
 
 /*
@@ -212,7 +242,7 @@ LookupAll will use mDNS to lookup all services named _name._tcp and return a sli
 
 If a lookup has already been made earlier, the cached results will be returned and then a new lookup made in the background.
 */
-func LookupAll(name string) (result []*Client, err error) {
+func LookupAll(name string) (result Clients, err error) {
 	entriesLock.RLock()
 	addresses := entries[name]
 	entriesLock.RUnlock()
