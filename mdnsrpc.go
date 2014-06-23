@@ -16,7 +16,7 @@ import (
 	"github.com/armon/mdns"
 )
 
-var entries = map[string][]string{}
+var entries = map[string]map[string]struct{}{}
 var entriesLock = &sync.RWMutex{}
 var clients = map[string]*Client{}
 var clientsLock = &sync.RWMutex{}
@@ -26,7 +26,7 @@ func init() {
 }
 
 func lookupAll(name string) (err error) {
-	addresses := []string{}
+	addresses := map[string]struct{}{}
 	serviceEntries := make(chan *mdns.ServiceEntry, 2<<16)
 	params := mdns.DefaultParams(name)
 	params.Entries = serviceEntries
@@ -34,7 +34,7 @@ func lookupAll(name string) (err error) {
 	done := make(chan struct{})
 	go func() {
 		for entry := range serviceEntries {
-			addresses = append(addresses, fmt.Sprintf("%v:%v", entry.Addr.String(), entry.Port))
+			addresses[fmt.Sprintf("%v:%v", entry.Addr.String(), entry.Port)] = struct{}{}
 		}
 		close(done)
 	}()
@@ -56,11 +56,12 @@ func connectAll(name string) (err error) {
 	entriesLock.RUnlock()
 	clientsLock.Lock()
 	defer clientsLock.Unlock()
-	for _, addr := range addresses {
+	for addr, _ := range addresses {
 		if _, found := clients[addr]; !found {
 			var client *rpc.Client
 			if client, err = rpc.Dial("tcp", addr); err == nil {
 				clients[addr] = &Client{
+					name:   name,
 					client: client,
 					addr:   addr,
 				}
@@ -103,6 +104,7 @@ A wrapper for *rpc.Client that removes the wrapped *rpc.Client from the cache if
 */
 type Client struct {
 	addr   string
+	name   string
 	client *rpc.Client
 }
 
@@ -142,6 +144,11 @@ func (self *Client) Go(serviceMethod string, args interface{}, reply interface{}
 			clientsLock.Lock()
 			defer clientsLock.Unlock()
 			delete(clients, self.addr)
+			entriesLock.Lock()
+			defer entriesLock.Unlock()
+			if theseEntries, found := entries[self.name]; found {
+				delete(theseEntries, self.addr)
+			}
 		}
 	}()
 	return
@@ -159,6 +166,11 @@ func (self *Client) Call(service string, input, output interface{}) (err error) 
 		clientsLock.Lock()
 		defer clientsLock.Unlock()
 		delete(clients, self.addr)
+		entriesLock.Lock()
+		defer entriesLock.Unlock()
+		if theseEntries, found := entries[self.name]; found {
+			delete(theseEntries, self.addr)
+		}
 	}
 	return
 }
@@ -198,7 +210,7 @@ NotOneService is returned when LookupOne fails to find exactly one service.
 */
 type NotOneService struct {
 	Name  string
-	Found []string
+	Found map[string]struct{}
 }
 
 func (self NotOneService) Error() string {
@@ -230,7 +242,11 @@ func LookupOne(name string) (result *Client, err error) {
 		}
 		return LookupOne(name)
 	}
-	if result, err = Connect(addresses[0]); err != nil {
+	addr := ""
+	for a, _ := range addresses {
+		addr = a
+	}
+	if result, err = Connect(addr); err != nil {
 		return
 	}
 	go connectAll(name)
@@ -259,7 +275,7 @@ func LookupAll(name string) (result Clients, err error) {
 		}
 		return LookupAll(name)
 	}
-	for _, addr := range addresses {
+	for addr, _ := range addresses {
 		var client *Client
 		if client, err = Connect(addr); err != nil {
 			return
